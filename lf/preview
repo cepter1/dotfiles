@@ -1,0 +1,10 @@
+#!/bin/sh
+
+case "$(file --mime-type -Lb "$1")" in
+    text/*|application/json|application/xml|application/x-shellscript)
+        sed -n '1,200p' "$1";;
+    image/*)
+        file "$1";;
+    *)
+        file "$1";;
+esac

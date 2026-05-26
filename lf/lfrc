@@ -1,0 +1,98 @@
+# Basic behavior
+set icons
+set ignorecase
+set smartcase
+set ratios 1:2:3
+set drawbox
+set number
+set relativenumber
+
+# Previews
+set preview
+set previewer ~/.config/lf/preview
+
+# Open common file types with preferred programs.
+cmd open ${{
+    case "$(file --mime-type -Lb "$f")" in
+        image/*)
+            nsxiv -a "$f" >/dev/null 2>&1 &;;
+        application/pdf|application/epub*)
+            zathura "$f" >/dev/null 2>&1 &;;
+        video/*|audio/*)
+            mpv "$f" >/dev/null 2>&1 &;;
+        text/*|application/json|application/xml|application/x-shellscript)
+            nvim "$f";;
+        *)
+            xdg-open "$f" >/dev/null 2>&1 &;;
+    esac
+}}
+
+cmd open-with-nsxiv ${{
+    nsxiv -a "$f" >/dev/null 2>&1 &
+}}
+
+cmd open-with-zathura ${{
+    zathura "$f" >/dev/null 2>&1 &
+}}
+
+cmd open-with-mpv ${{
+    mpv "$f" >/dev/null 2>&1 &
+}}
+
+cmd open-with-nvim ${{
+    nvim "$f"
+}}
+
+cmd open-terminal ${{
+    st >/dev/null 2>&1 &
+}}
+
+# Create files/directories.
+cmd mkdir ${{
+    printf "Directory name: "
+    read -r name
+    mkdir -p -- "$name"
+}}
+
+cmd touch ${{
+    printf "File name: "
+    read -r name
+    touch -- "$name"
+}}
+
+# Safer remove prompt.
+cmd trash ${{
+    printf "Delete %s? [y/N] " "$fx"
+    read -r answer
+    [ "$answer" = y ] || [ "$answer" = Y ] || exit 0
+    IFS="$(printf '\n\t')"
+    rm -rf -- $fx
+}}
+
+# Key bindings
+map . set hidden!
+map gh cd ~
+map gr cd /
+map gd cd ~/Downloads
+map gc cd ~/.config
+
+map o open
+map e open
+map I open-with-nsxiv
+map Z open-with-zathura
+map M open-with-mpv
+map E open-with-nvim
+map t open-terminal
+map c :copy; unselect
+map v paste
+map x cut
+map u :unselect; clear
+map A push :mkdir<enter>
+map a push :touch<enter>
+map r push :rename<space>
+map d trash
+map D trash
+map <delete> trash
+
+map <enter> open
+map q quit
