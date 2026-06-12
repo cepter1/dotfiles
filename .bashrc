@@ -16,4 +16,8 @@ alias fan6='echo level 6 | sudo tee /proc/acpi/ibm/fan'
 alias fan7='echo level 7 | sudo tee /proc/acpi/ibm/fan'
 alias fanauto='echo auto | sudo tee /proc/acpi/ibm/fan'
 alias faninfo='cat /proc/acpi/ibm/fan'
+alias update-grub='grub-mkconfig -o /boot/grub/grub.cfg'
+alias pycreate='python -m venv .venv && source .venv/bin/activate'
+alias pyrun='source .venv/bin/activate'
+
 PS1='[\u@\h \W]\$ '
