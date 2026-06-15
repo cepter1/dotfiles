@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REVIEW_BASE="${AUR_REVIEW_DIR:-$HOME/aur-review}"
+STAMP="$(date +%F-%H%M%S)"
+REVIEW_DIR="$REVIEW_BASE/$STAMP"
+
+SUSPICIOUS_REGEX='install=|post_install|post_upgrade|post_remove|pre_install|pre_upgrade|npm|bun|yarn|pnpm|pip|curl|wget|bash[[:space:]]+-c|sh[[:space:]]+-c|eval|base64|/tmp|/var/tmp|sudo|doas|chmod[[:space:]]+\+s|chown[[:space:]]+root|systemctl|rc-service|SKIP|gpg[[:space:]]+--recv|ssh://|nc[[:space:]]|ncat|socat|python[[:space:]]+-c|perl[[:space:]]+-e|ruby[[:space:]]+-e'
+
+needcmd() {
+    command -v "$1" >/dev/null 2>&1 || {
+        printf 'Missing required command: %s\n' "$1" >&2
+        exit 1
+    }
+}
+
+needcmd yay
+needcmd git
+needcmd grep
+needcmd find
+needcmd awk
+needcmd sed
+needcmd sort
+
+mkdir -p "$REVIEW_DIR"
+cd "$REVIEW_DIR"
+
+if [ "$#" -gt 0 ]; then
+    MODE="manual"
+    mapfile -t PKGS < <(printf '%s\n' "$@" | sed 's|^aur/||' | sort -u)
+else
+    MODE="updates"
+    mapfile -t PKGS < <(yay -Qua | awk '{print $1}' | sed 's|^aur/||' | sort -u)
+fi
+
+if [ "${#PKGS[@]}" -eq 0 ]; then
+    printf 'No AUR packages to audit.\n'
+    exit 0
+fi
+
+printf '%s\n' "${PKGS[@]}" > PACKAGE_LIST.txt
+
+printf 'Mode: %s\n' "$MODE"
+printf 'Review directory: %s\n\n' "$REVIEW_DIR"
+
+printf 'Packages to audit:\n'
+printf '  %s\n' "${PKGS[@]}"
+printf '\n'
+
+printf 'Downloading AUR PKGBUILDs only. Nothing will be built or installed.\n\n'
+
+FAILED=0
+
+for pkg in "${PKGS[@]}"; do
+    printf '==> Downloading %s\n' "$pkg"
+
+    if ! yay -G "$pkg"; then
+        printf 'FAILED: %s\n' "$pkg" | tee -a DOWNLOAD_FAILURES.txt
+        FAILED=1
+    fi
+done
+
+if [ "$FAILED" -ne 0 ]; then
+    printf '\nSome packages failed to download. Check:\n'
+    printf '  %s/DOWNLOAD_FAILURES.txt\n' "$REVIEW_DIR"
+fi
+
+printf '\nGenerating review file list...\n'
+
+find . -maxdepth 4 -type f \( \
+    -name 'PKGBUILD' \
+    -o -name '.SRCINFO' \
+    -o -name '*.install' \
+    -o -name '*.sh' \
+    -o -name '*.bash' \
+    -o -name '*.zsh' \
+    -o -name '*.desktop' \
+    -o -name '*.service' \
+    -o -name '*.timer' \
+    -o -name '*.socket' \
+    -o -name '*.patch' \
+    -o -name '*.diff' \
+    -o -name '*.conf' \
+\) | sort > FILES_TO_REVIEW.txt
+
+printf 'Running local suspicious-pattern scan...\n'
+
+grep -RInE "$SUSPICIOUS_REGEX" . \
+    --exclude-dir='.git' \
+    > SUSPICIOUS_GREP.txt 2>/dev/null || true
+
+printf 'Writing git history summaries...\n'
+
+: > GIT_HISTORY.txt
+
+for dir in */; do
+    [ -d "$dir/.git" ] || continue
+
+    {
+        printf '\n===== %s =====\n' "$dir"
+        git -C "$dir" log --oneline --decorate -n 12
+        printf '\n--- HEAD stat ---\n'
+        git -C "$dir" show --stat --oneline --decorate --no-renames HEAD
+        printf '\n--- HEAD diff summary ---\n'
+        git -C "$dir" show --name-status --oneline --decorate --no-renames HEAD
+    } >> GIT_HISTORY.txt
+done
+
+cat > CODEX_PROMPT.txt <<'EOF'
+Audit these downloaded AUR package files for suspicious behavior.
+
+Rules:
+- Do not build anything.
+- Do not install anything.
+- Do not modify files.
+- Only analyze the local files.
+
+Review:
+- PKGBUILD
+- .SRCINFO
+- *.install
+- scripts
+- desktop files
+- systemd units
+- patches
+- git history summaries
+- suspicious grep results
+
+Check for:
+- install hooks: install=, post_install, post_upgrade, post_remove
+- network execution: curl, wget, npm, bun, yarn, pnpm, pip
+- shell execution: bash -c, sh -c, eval, base64, python -c, perl -e, ruby -e
+- /tmp or /var/tmp execution
+- privilege escalation: sudo, doas, chmod +s, chown root
+- service changes: systemctl, rc-service
+- skipped checksums: SKIP
+- unpinned git sources
+- mismatched upstream URLs
+- suspicious new maintainers
+- suspicious recent commits
+- desktop files with suspicious Exec lines
+- anything executed during prepare(), build(), check(), package(), post_install(), or post_upgrade()
+
+Output format:
+
+BEGIN_FINAL_OPINION
+Overall verdict: SAFE TO INSTALL / NEEDS MANUAL REVIEW / DO NOT INSTALL
+
+One-sentence reason:
+Write one plain-English sentence.
+
+Package verdicts:
+- package-name: CLEAN / NEEDS MANUAL REVIEW / SUSPICIOUS / DO NOT BUILD
+
+Final recommendation:
+Say plainly whether I should install it or not.
+END_FINAL_OPINION
+
+Then give detailed findings below the final opinion.
+
+For every suspicious item, quote the exact filename and line.
+EOF
+
+printf 'Running Codex read-only audit...\n\n'
+
+if command -v codex >/dev/null 2>&1; then
+    codex exec \
+        --sandbox read-only \
+        --skip-git-repo-check \
+        -c approval_policy=\"never\" \
+        "$(cat CODEX_PROMPT.txt)" \
+        > CODEX_REPORT.txt 2>&1 || true
+else
+    printf 'Codex is not installed or not in PATH.\n' > CODEX_REPORT.txt
+fi
+
+awk '
+/^BEGIN_FINAL_OPINION$/ {flag=1; next}
+/^END_FINAL_OPINION$/ {flag=0}
+flag
+' CODEX_REPORT.txt > CODEX_FINAL_OPINION.txt
+
+if [ ! -s CODEX_FINAL_OPINION.txt ]; then
+    printf 'Codex did not provide a clean final-opinion block. Read CODEX_REPORT.txt manually.\n' > CODEX_FINAL_OPINION.txt
+fi
+
+cat > AUDIT_SUMMARY.txt <<EOF
+AUR audit directory:
+$REVIEW_DIR
+
+Mode:
+$MODE
+
+Packages:
+$(printf '%s\n' "${PKGS[@]}")
+
+Files generated:
+- PACKAGE_LIST.txt
+- FILES_TO_REVIEW.txt
+- SUSPICIOUS_GREP.txt
+- GIT_HISTORY.txt
+- CODEX_PROMPT.txt
+- CODEX_REPORT.txt
+- CODEX_FINAL_OPINION.txt
+
+Nothing has been built or installed yet.
+EOF
+
+printf '\nAudit complete.\n\n'
+printf 'Review directory:\n'
+printf '  %s\n\n' "$REVIEW_DIR"
+
+printf 'Important files:\n'
+printf '  %s/SUSPICIOUS_GREP.txt\n' "$REVIEW_DIR"
+printf '  %s/GIT_HISTORY.txt\n' "$REVIEW_DIR"
+printf '  %s/CODEX_FINAL_OPINION.txt\n' "$REVIEW_DIR"
+printf '  %s/CODEX_REPORT.txt\n\n' "$REVIEW_DIR"
+
+printf 'Codex final opinion:\n\n'
+cat CODEX_FINAL_OPINION.txt
+printf '\n'
+
+if [ -s SUSPICIOUS_GREP.txt ]; then
+    printf '\nLocal grep found items that may need review.\n'
+    printf 'Open suspicious scan now? [y/N] '
+    read -r ans
+    case "$ans" in
+        y|Y)
+            ${PAGER:-less} SUSPICIOUS_GREP.txt
+            ;;
+    esac
+fi
+
+printf 'Open full Codex report now? [y/N] '
+read -r ans
+case "$ans" in
+    y|Y)
+        ${PAGER:-less} CODEX_REPORT.txt
+        ;;
+esac
+
+SAFE_TO_INSTALL=0
+
+if grep -qi '^Overall verdict:[[:space:]]*SAFE TO INSTALL' CODEX_FINAL_OPINION.txt; then
+    if ! grep -Eqi 'DO NOT INSTALL|DO NOT BUILD|SUSPICIOUS|NEEDS MANUAL REVIEW' CODEX_FINAL_OPINION.txt; then
+        SAFE_TO_INSTALL=1
+    fi
+fi
+
+if [ "$SAFE_TO_INSTALL" -ne 1 ]; then
+    printf '\nCodex did not give a clean SAFE TO INSTALL verdict.\n'
+    printf 'No install option will be offered by default.\n'
+    printf 'Read the report manually before doing anything.\n'
+    printf '\nNo packages installed.\n'
+    exit 0
+fi
+
+find_pkg_dir() {
+    local pkg="$1"
+    local dir
+
+    if [ -d "$pkg" ] && [ -f "$pkg/PKGBUILD" ]; then
+        printf '%s\n' "$pkg"
+        return 0
+    fi
+
+    for dir in */; do
+        [ -f "$dir/.SRCINFO" ] || continue
+
+        if grep -Eq "^[[:space:]]*(pkgbase|pkgname)[[:space:]]*=[[:space:]]*$pkg[[:space:]]*$" "$dir/.SRCINFO"; then
+            printf '%s\n' "${dir%/}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+unique_dirs_for_pkgs() {
+    local pkg dir
+    for pkg in "$@"; do
+        if dir="$(find_pkg_dir "$pkg")"; then
+            printf '%s\n' "$dir"
+        else
+            printf 'Could not find local PKGBUILD directory for %s\n' "$pkg" >&2
+        fi
+    done | sort -u
+}
+
+printf '\nCodex gave a clean SAFE TO INSTALL verdict.\n\n'
+
+printf 'Install options:\n'
+printf '  a = install all reviewed packages\n'
+printf '  s = select packages to install\n'
+printf '  n = install nothing\n\n'
+
+printf 'Choose [a/s/n]: '
+read -r choice
+
+case "$choice" in
+    a|A)
+        mapfile -t DIRS < <(unique_dirs_for_pkgs "${PKGS[@]}")
+        ;;
+
+    s|S)
+        printf '\nAvailable packages:\n'
+        printf '  %s\n' "${PKGS[@]}"
+        printf '\nEnter package names to install, separated by spaces:\n'
+        read -r selected
+
+        if [ -z "$selected" ]; then
+            printf 'No packages selected.\n'
+            exit 0
+        fi
+
+        read -r -a SELECTED_PKGS <<< "$selected"
+        mapfile -t DIRS < <(unique_dirs_for_pkgs "${SELECTED_PKGS[@]}")
+        ;;
+
+    *)
+        printf 'No packages installed.\n'
+        exit 0
+        ;;
+esac
+
+if [ "${#DIRS[@]}" -eq 0 ]; then
+    printf 'No matching local package directories found.\n'
+    exit 1
+fi
+
+printf '\nThe following reviewed local directories will be built/installed:\n'
+printf '  %s\n' "${DIRS[@]}"
+
+printf '\nThis will use makepkg -si from the reviewed local directories.\n'
+printf 'If an unreviewed AUR dependency is missing, makepkg should fail.\n'
+printf 'Audit missing AUR dependencies separately first.\n\n'
+
+printf 'Proceed with install? [y/N] '
+read -r ans
+
+case "$ans" in
+    y|Y)
+        ;;
+    *)
+        printf 'Install cancelled.\n'
+        exit 0
+        ;;
+esac
+
+for dir in "${DIRS[@]}"; do
+    printf '\n==> Installing from reviewed directory: %s\n' "$dir"
+    (
+        cd "$dir"
+        makepkg -si
+    )
+done
+
+printf '\nDone.\n'
