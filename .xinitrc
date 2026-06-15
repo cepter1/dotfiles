@@ -8,12 +8,12 @@
 # User runit services 
 #export SVDIR="$HOME/.config/runit/service" 
 #runsvdir_pid="" 
-#start_user_services() { 
+# #start_user_services() { 
 #    [ -d "$SVDIR" ] || return 0 
 #    runsvdir -P "$SVDIR" & 
 #    runsvdir_pid="$!" 
 #} 
-#stop_user_services() { 
+# #stop_user_services() { 
 #    [ -d "$SVDIR" ] || return 0 
 #    sv exit "$SVDIR"/* >/dev/null 2>&1 
 #    [ -n "$runsvdir_pid" ] && kill "$runsvdir_pid" >/dev/null 2>&1 
